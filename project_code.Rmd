@@ -1,0 +1,518 @@
+---
+title: "Data Science Interview Project"
+author: "Jordan Cochuyt"
+date: "2023-08-29"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(tidyverse)
+library(tidymodels)
+library(summarytools)
+library(gtsummary)
+library(arsenal)
+library(randomForest)
+library(caret)
+library(pROC)
+library(ROCR)
+library(Hmisc)
+library(ROSE)
+library(DT)
+
+## Pulling in the text files with the data
+claims_test <- read.table(file = "Claims_Test.txt", header = TRUE)                          ## Claims Dataset used for Testing the Model
+claims_train <- read.table(file = "Claims_Train.txt", header = TRUE)                        ## Claims Dataset used for Training the Model
+location_of_service <- read.table(file = "Location_Of_Service.txt", header = TRUE)          ## Information for location of Services | Will use in case logic
+surgeries_test <- read.table(file = "Surgeries_Test.txt", header = TRUE)                    ## Surgeries Dataset used for Testing the Model
+surgeries_train <- read.table(file = "Surgeries_Train.txt", header = TRUE)                  ## Surgeries Dataset used for Training the Model
+
+############################### Training Data Setup ######################################################
+claims_train <- claims_train %>% mutate(LOS_DESC = as.factor(case_when(LOS_CODE == 23 ~ "Emergency Room",                                 ## Linking the location of service categories into a new variable 
+                              LOS_CODE == 22 ~ "Outpatient",
+                              LOS_CODE == 21 ~ "Inpatient",
+                              LOS_CODE == 11 ~ "Professional",
+                              LOS_CODE == 20 ~ "Urgent Care",
+                              LOS_CODE == 34 ~ "Hospice",
+                              LOS_CODE == 2 ~ "Telehealth")))
+
+#### Making a flag for Outpatient LOS
+outpatient_ids <- claims_train %>% filter(LOS_DESC == "Outpatient") %>% select(MEMBER_ID)
+outpatient_ids <- outpatient_ids[,1]
+
+#### Professional flag ids
+professional_ids <- claims_train %>% filter(LOS_DESC == "Professional") %>% select(MEMBER_ID)
+professional_ids <- professional_ids[,1]
+
+#### Inpatient flag ids
+inpatient_ids <- claims_train %>% filter(LOS_DESC  == "Inpatient") %>% select(MEMBER_ID)
+inpatient_ids <- inpatient_ids[,1]
+
+### Number of claims
+claims_num <- claims_train %>% group_by(MEMBER_ID) %>% summarise(claim_count = n())
+
+### New claims training dataset
+claims_num <- claims_num %>% mutate(outpatient = case_when(MEMBER_ID %in% outpatient_ids ~ "Yes",
+                                                           TRUE ~ "No"),
+                                    professional = case_when(MEMBER_ID %in% professional_ids ~ "Yes",
+                                                              TRUE ~ "No "),
+                                    inpatient = case_when(MEMBER_ID %in% inpatient_ids ~ "Yes",
+                                                           TRUE ~ "No"))
+
+training.data <- left_join(surgeries_train, claims_num, by = "MEMBER_ID") %>%                  ## Joining the training datasets together by MEMBER_ID
+  mutate(
+         ### Making outcome SURGERY a Factor (categorical variable)
+         SURGERY = as.factor(case_when(SURGERY == "no" ~ "No",
+                                       SURGERY == "yes" ~ "Yes")),
+         ### Making DIABETES a Factor (categorical variable)
+         DIABETES = as.factor(case_when(DIABETES == 0 ~ "No",
+                              DIABETES == 1 ~ "Yes")),
+         ### Making OPIOID_RX a Factor (categorical variable)
+         OPIOID_RX = as.factor(case_when(OPIOID_RX == 0 ~ "No",
+                                         OPIOID_RX == 1 ~ "Yes")),
+         ### Making CANCER a Factor (categorical variable)
+         CANCER = as.factor(case_when(CANCER == 0 ~ "No",
+                                      CANCER == 1 ~ "Yes")),
+         ### Making Gender a Factor (categorical variable)
+         GENDER = as.factor(GENDER)
+         )
+
+### Imputing the median value for claims_count
+training.data <- training.data %>% mutate(claim_count = impute(claim_count, median))
+
+##################################### Testing Data Setup ################################################
+claims_test <- claims_test %>% mutate(LOS_DESC = as.factor(case_when(LOS_CODE == 23 ~ "Emergency Room",                                 ## Linking the location of service categories into a new variable 
+                              LOS_CODE == 22 ~ "Outpatient",
+                              LOS_CODE == 21 ~ "Inpatient",
+                              LOS_CODE == 11 ~ "Professional",
+                              LOS_CODE == 20 ~ "Urgent Care",
+                              LOS_CODE == 34 ~ "Hospice",
+                              LOS_CODE == 2 ~ "Telehealth")))
+
+#### Making a flag for Outpatient LOS
+outpatient_ids_test <- claims_test %>% filter(LOS_DESC == "Outpatient") %>% select(MEMBER_ID)
+outpatient_ids_test <- outpatient_ids_test[,1]
+
+#### Professional flag ids
+professional_ids_test <- claims_test %>% filter(LOS_DESC == "Professional") %>% select(MEMBER_ID)
+professional_ids_test <- professional_ids_test[,1]
+
+#### Inpatient flag ids
+inpatient_ids_test <- claims_test %>% filter(LOS_DESC  == "Inpatient") %>% select(MEMBER_ID)
+inpatient_ids_test <- inpatient_ids_test[,1]
+
+### Number of claims
+claims_num_test <- claims_test %>% group_by(MEMBER_ID) %>% summarise(claim_count = n())
+
+### New claims training dataset
+claims_num_test <- claims_num_test %>% mutate(outpatient = case_when(MEMBER_ID %in% outpatient_ids_test ~ "Yes",
+                                                           TRUE ~ "No"),
+                                    professional = case_when(MEMBER_ID %in% professional_ids_test ~ "Yes",
+                                                              TRUE ~ "No "),
+                                    inpatient = case_when(MEMBER_ID %in% inpatient_ids_test ~ "Yes",
+                                                           TRUE ~ "No"))
+
+testing.data <- left_join(surgeries_test, claims_num_test, by = "MEMBER_ID") %>%                  ## Joining the training datasets together by MEMBER_ID
+  mutate(
+         ### Making DIABETES a Factor (categorical variable)
+         DIABETES = as.factor(case_when(DIABETES == 0 ~ "No",
+                              DIABETES == 1 ~ "Yes")),
+         ### Making OPIOID_RX a Factor (categorical variable)
+         OPIOID_RX = as.factor(case_when(OPIOID_RX == 0 ~ "No",
+                                         OPIOID_RX == 1 ~ "Yes")),
+         ### Making CANCER a Factor (categorical variable)
+         CANCER = as.factor(case_when(CANCER == 0 ~ "No",
+                                      CANCER == 1 ~ "Yes")),
+         ### Making Gender a Factor (categorical variable)
+         GENDER = as.factor(GENDER)
+         )
+
+### Imputing the missing claim counts to the median of the training to stay consitent between the two
+testing.data <- testing.data %>% mutate(claim_count = impute(claim_count, 2))
+
+```
+
+# Exploritory Data Analysis
+## Descriptive Statistics of the Training Data
+```{r summary}
+### Taking out any variables that do not need a summary i.e. MEMBER_ID
+dfsummary.data <- training.data %>% select(SURGERY, WEIGHTED_RISK_SCORE, DIABETES, OPIOID_RX, CANCER, AGE, GENDER, claim_count, outpatient, professional, inpatient)
+
+### Table displaying summary statistics from the summarytools package
+print(dfSummary(dfsummary.data,
+          varnumbers = FALSE, 
+          valid.col = FALSE, 
+          graph.magnif = 0.76),
+      method = 'render')
+```
+
+## Descriptive Statistics of the Training Data by SURGERY
+```{r, results="asis"}
+tab.surg <- tableby(SURGERY ~ ., data = dfsummary.data)
+summary(tab.surg, text = TRUE) 
+```
+
+## Box Plots 
+
+### Inpatient vs Non-Inpatient Claim Count
+
+```{r, warning=FALSE} 
+ggplot(aes(x = inpatient, y = claim_count), data = dfsummary.data) + geom_boxplot() + xlab("Inpatient") + ylab("# of Claims") + theme_classic() + theme(legend.position = "none")
+```
+
+### Professional vs Non-Professional Claim Count
+
+```{r, warining = FALSE}
+ggplot(aes(x = professional, y = claim_count), data = dfsummary.data) + geom_boxplot() + xlab("Professional") + ylab("# of Claims") + theme_classic() + theme(legend.position = "none")
+```
+
+### Outpatient vs Non-Outpatient Claim Count
+
+```{r} 
+ggplot(aes(x = outpatient, y = claim_count), data = dfsummary.data) + geom_boxplot() + xlab("Outpatient") + ylab("# of Claims") + theme_classic() + theme(legend.position = "none")
+```
+
+### DIABETES vs Non-Diabetes Claim Count
+
+```{r}
+ggplot(aes(x = DIABETES, y = claim_count), data = dfsummary.data) + geom_boxplot() + xlab("Diabetes") + ylab("# of Claims") + theme_classic() + theme(legend.position = "none")
+```
+
+### DIABETES vs Non-Diabetes Weighted Risk Score
+
+```{r}
+ggplot(aes(x = DIABETES, y = WEIGHTED_RISK_SCORE), data = dfsummary.data) + geom_boxplot() + xlab("Diabetes") + ylab("Risk Score") + theme_classic() + theme(legend.position = "none")
+```
+
+### DIABETES vs Non-Diabetes  Age
+
+```{r}
+ggplot(aes(x = DIABETES, y = AGE), data = dfsummary.data) + geom_boxplot() + xlab("Diabetes") + ylab("Age") + theme_classic() + theme(legend.position = "none")
+```
+
+### OPIOIDs Claim Count
+
+```{r}
+ggplot(aes(x = OPIOID_RX, y = claim_count), data = dfsummary.data) + geom_boxplot() + xlab("Opioid Use") + ylab("# of Claims") + theme_classic() + theme(legend.position = "none")
+```
+
+### OPIOIDs Weighted Risk Score
+
+```{r}
+ggplot(aes(x = OPIOID_RX, y = WEIGHTED_RISK_SCORE), data = dfsummary.data) + geom_boxplot() + xlab("Opioid Use") + ylab("Risk Score") + theme_classic() + theme(legend.position = "none")
+```
+
+### OPIOIDs Age
+
+```{r}
+ggplot(aes(x = OPIOID_RX, y = AGE), data = dfsummary.data) + geom_boxplot() + xlab("Opioid Use") + ylab("Age") + theme_classic() + theme(legend.position = "none")
+```
+
+## Univariate Logistic Regression to check for association
+```{r}
+### Univariate Logistic Regression to check for associations between the covariates and our surgery outcome
+dfsummary.data %>%
+  tbl_uvregression(method = glm,
+                   y = factor(SURGERY),
+                   method.args = list(family = binomial),
+                   exponentiate = TRUE
+                   )
+
+```
+
+## Multivariate Logistic Regression Model
+### Variable Selection for Model
+1) Removing the key id variables for the individuals (i.e. MEMBER_ID, CLAIM_ID)  
+2) Remove ICD10: There are simply to many categories currently for this to be in the model. An interesting piece that could be added here would be to include area of diagnosis. This may show areas that are more likely than others to receive a surgery and help strengthen a prediction.    
+3) Remove Cancer: The reason for removing cancer we simply do not have enough individuals with surgery to use it in the model (count of 5). For this reason I am pulling the variable from the data set.  
+4) Remove Gender: When we look above at the univariate logistic model gender is not significant (p-value: .4), for a significant association between having a surgery and the gender of an individual. Since there is no significant evidence here I will not include it in the model.  
+5) Remove Diabetes: When we look above at the univariate logistic model Diabetes is not significant (p-value: .8).  
+
+```{r,}
+
+### Setting the randomization seed for reproducibility
+set.seed(12345)
+
+### Pulling out some data to validate the model and see its performance
+training.final.split <- initial_split(dfsummary.data, prop = .75,
+                                       strata = SURGERY)
+
+training.train <- training.final.split %>% training()
+training.test <- training.final.split %>% testing()
+
+### Specifying the model type
+logistic_model <- logistic_reg() %>% 
+  set_engine("glm") %>% 
+  set_mode("classification")
+
+### Specifying the recipe
+  logistic_rec <- recipe(SURGERY ~ WEIGHTED_RISK_SCORE + AGE + OPIOID_RX + claim_count, data = training.train)
+  
+### Making the workflow
+  logistic_workflow <- workflow() %>%
+    add_model(logistic_model) %>%
+    add_recipe(logistic_rec)
+  
+### Fit the model to the data
+  logistic_model_fit <- logistic_workflow %>%
+    fit(data = training.train)
+
+tidy(logistic_model_fit, exponentiate = TRUE)
+```
+
+## Model Prediction using Testing Data
+```{r}
+## Run validation of the model
+logistic_prob_preds <- predict(logistic_model_fit,
+                new_data = training.test,
+                type = "prob")
+
+logistic_results <- training.test %>% 
+  select(SURGERY) %>%
+  bind_cols(logistic_prob_preds)
+
+### Pulling the top 6% of the pred_Yes to be classed as a "Yes" for surgery
+top2.logistic.preds <- logistic_results %>% slice_max(order_by=.pred_Yes, prop = 0.02) %>% mutate(pred.class = "Yes")
+
+### Pulling the bottom 94% of the pred_Yes to be calssed as a "No" for surgery
+bottom98.logistic.preds <- logistic_results %>% slice_min(order_by = .pred_Yes, prop = 0.98) %>% mutate(pred.class = "No")
+
+logistic.pred.final <- rbind(top2.logistic.preds, bottom98.logistic.preds) %>% mutate(pred.class = as.factor(pred.class))
+
+```
+
+### Confidence Matrix
+```{r}
+conf_mat(logistic.pred.final, truth = SURGERY,
+         estimate = pred.class)
+```
+
+### Accuracy
+```{r}
+accuracy(logistic.pred.final, truth = SURGERY,
+         estimate = pred.class)
+```
+
+#### ROC CURVE
+```{r}
+roc_curve(logistic.pred.final, truth = SURGERY, .pred_Yes, event_level = "second") %>% autoplot()
+```
+
+### AUC
+```{r}
+roc_auc(logistic.pred.final, truth = SURGERY, .pred_Yes, event_level = "second")
+```
+
+## Random Forest Full Model (No-resample)
+
+### Random Forest Model
+```{r}
+randomforest.data <- training.train %>% select(-outpatient, -inpatient, -professional)
+
+rf <- randomForest(SURGERY ~ ., data = randomforest.data,  mtry = 4, ntree = 250, importance = TRUE) ## 4 Levels to decision trees, 1000 trees for each prediction, keep the importance metrics for variables
+
+rf
+
+```
+
+#### Importance of Variables
+
+```{r}
+importance = importance(rf)
+varImportance = data.frame(Variables = row.names(importance),
+                           Importance = round(importance[, "MeanDecreaseAccuracy"], 2))
+
+rankImportance = varImportance %>% mutate(Rank = paste('#', dense_rank(desc(Importance))))
+
+ggplot(rankImportance, aes(x = reorder(Variables,Importance), y= Importance, fill = Importance))  + 
+  geom_bar(stat='identity') + 
+  geom_text(aes(x = Variables, y = 0.5, label = Rank),
+            hjust=0, vjust=0.55, size = 4, colour = 'white') +
+  labs(x = 'Variables') +
+  coord_flip() + 
+  theme_classic()
+```
+
+#### Validation of Full Model
+```{r}
+randomforest.test <- training.test %>% filter(is.na(outpatient))
+retain_p <- rf %>% predict(newdata = training.test)
+
+table(
+  actualclass = training.test$SURGERY,
+  predictedclass = retain_p
+) %>% 
+  confusionMatrix(positive='Yes') %>% 
+  print()
+```
+
+### Reduced Random Forest Model
+```{r}
+randomforest.data.2 <- randomforest.data %>% select(-CANCER, -GENDER, - DIABETES)
+rf2 <- randomForest(SURGERY ~ ., data = randomforest.data.2,  mtry = 4, ntree = 250, importance = TRUE) ## 4 Levels to decision trees, 1000 trees for each prediction, keep the importance metrics for variables
+
+rf2
+
+```
+
+#### Importance of Variables
+
+```{r}
+importance = importance(rf2)
+varImportance = data.frame(Variables = row.names(importance),
+                           Importance = round(importance[, "MeanDecreaseAccuracy"], 2))
+
+rankImportance = varImportance %>% mutate(Rank = paste('#', dense_rank(desc(Importance))))
+
+ggplot(rankImportance, aes(x = reorder(Variables,Importance), y= Importance, fill = Importance))  + 
+  geom_bar(stat='identity') + 
+  geom_text(aes(x = Variables, y = 0.5, label = Rank),
+            hjust=0, vjust=0.55, size = 4, colour = 'white') +
+  labs(x = 'Variables') +
+  coord_flip() + 
+  theme_classic()
+```
+
+#### Validation of Reduced Model
+```{r}
+randomforest.test <- training.test %>% filter(is.na(outpatient))
+retain_p <- rf2 %>% predict(newdata = training.test)
+
+table(
+  actualclass = training.test$SURGERY,
+  predictedclass = retain_p
+) %>% 
+  confusionMatrix(positive='Yes') %>% 
+  print()
+```
+
+## Random Forest Data Resampling (Over-Sampling)
+```{r}
+### Resampling the Data to get rid of the imbalanced outcome
+randomforest.data.resample <- ovun.sample(SURGERY ~ ., data = randomforest.data, method = "over", N = 50000, seed = 1234)$data
+
+freq(randomforest.data.resample$SURGERY)
+
+```
+
+### Resampled Random Forest Full Model
+```{r}
+### Random Forest Model
+rf3 <- randomForest(SURGERY ~ ., data = randomforest.data.resample,  mtry = 5, ntree = 250, importance = TRUE) ## 4 Levels to decision trees, 1000 trees for each prediction, keep the importance metrics for variables
+
+rf3
+
+```
+
+#### Variable Importance
+```{r}
+importance = importance(rf3)
+varImportance = data.frame(Variables = row.names(importance),
+                           Importance = round(importance[, "MeanDecreaseAccuracy"], 2))
+
+rankImportance = varImportance %>% mutate(Rank = paste('#', dense_rank(desc(Importance))))
+
+ggplot(rankImportance, aes(x = reorder(Variables,Importance), y= Importance, fill = Importance))  + 
+  geom_bar(stat='identity') + 
+  geom_text(aes(x = Variables, y = 0.5, label = Rank),
+            hjust=0, vjust=0.55, size = 4, colour = 'white') +
+  labs(x = 'Variables') +
+  coord_flip() + 
+  theme_classic()
+```
+
+#### Validation of Full Model
+```{r}
+retain_p <- rf3 %>% predict(newdata = training.test)
+
+table(
+  actualclass = training.test$SURGERY,
+  predictedclass = retain_p
+) %>% 
+  confusionMatrix(positive='Yes') %>% 
+  print()
+```
+
+### Model choice for official predictions: Reduced Random Forest Model
+```{r}
+model.testing <- rf2 %>% predict(newdata = testing.data, "prob")
+
+predictions <- data.frame(MEMBER_ID = testing.data$MEMBER_ID, Prediction = model.testing[,2])
+
+write.csv(predictions, file = "C:\\Users\\jorda\\OneDrive\\Desktop\\predictions.csv")
+### Threshold will be 0.408, because the top 2% of the predictions ends at that probability. 2% of Training data had surgery so we want to reflect that.
+```
+
+## Final Product
+#### Threshold: 0.408
+I have chosen to use the threshold 0.408 for my prediction probability classification. The reason for this being that is the threshold that reflects the top 2% of the predictions, which was the same as the percentage of surgeries within the training sample. The thought behind this is if we are predicting surgeries 2% of the testing data should be classified as surgeries. 
+
+#### What surgery are we predicting?
+#### Top 50 ICD-10 Procedure Codes for Surgery Claims in the Dataset
+```{r}
+train_desc_surg <- training.data %>% filter(SURGERY == "Yes")                ### Limit the data to only individuals that underwent surgery
+ICD10.codes <- freq(train_desc_surg$ICD10, order = "freq") %>% tb()          ### Get the counts of the individual ICD-10 codes
+top50.codes <- ICD10.codes[1:50,1:2]                                         ### Keep the top 50 codes and the frequencies associated
+
+### Manually insert the ICD-10 Code Descriptions
+top50 <- top50.codes %>% mutate(CODE_DESCRIPTION = case_when(ICD10 == "M79651" ~ "Pain in right thigh",
+                                                             ICD10 == "M25529" ~ "Pain in unspecified elbow",
+                                                             ICD10 == "M79674" ~ "Pain in right toe(s)",
+                                                             ICD10 == "M79642" ~ "Pain in left hand",
+                                                             ICD10 == "M25551" ~ "Pain in right hip",
+                                                             ICD10 == "M25562" ~ "pain experienced in the left knee",
+                                                             ICD10 == "M7910" ~ "Fistula, unspecified joint",
+                                                             ICD10 == "M25659" ~ "Stiffness of unspecified hip, not elsewhere classified",
+                                                             ICD10 == "M79644" ~ "Pain in right finger(s)",
+                                                             ICD10 == "M25641" ~ "Stiffness of right hand, not elsewhere classified",
+                                                             ICD10 == "M25652" ~ "Stiffness of left hip, not elsewhere classified",
+                                                             ICD10 == "M62830" ~ "back muscle spasms",
+                                                             ICD10 == "M25561" ~ "pain in the right knee",
+                                                             ICD10 == "M25651" ~ "Stiffness of right hip, not elsewhere classified",
+                                                             ICD10 == "M79652" ~ "Pain in left thigh",
+                                                             ICD10 == "M25675" ~ "Stiffness of left foot, not elsewhere classified",
+                                                             ICD10 == "M79639" ~ "Pain in unspecified forearm",
+                                                             ICD10 == "M79659" ~ "Pain in unspecified thigh",
+                                                             ICD10 == "M79669" ~ "Pain in unspecified lower leg",
+                                                             ICD10 == "M25631" ~ "Stiffness of right wrist, not elsewhere classified",
+                                                             ICD10 == "M79602" ~ "Pain in left arm",
+                                                             ICD10 == "M25542" ~ "Pain in joints of left hand",
+                                                             ICD10 == "M25552" ~ "Pain in Left Hip",
+                                                             ICD10 == "M25611" ~ "Stiffness of right shoulder, not elsewhere classified",
+                                                             ICD10 == "M25579" ~ "Pain in unspecified ankle and joints of unspecified foot",
+                                                             ICD10 == "M2550" ~ "Pain in the Unspecified Joint",
+                                                             ICD10 == "M79643" ~ "Pain in unspecified hand",
+                                                             ICD10 == "M79673" ~ "Pain in unspecified foot",
+                                                             ICD10 == "M25612" ~ "Stiffness of left shoulder, not elsewhere classified",
+                                                             ICD10 == "M25539" ~ "Pain in unspecified wrist",
+                                                             ICD10 == "M25672" ~ "Stiffness of left ankle, not elsewhere classified",
+                                                             ICD10 == "M79609" ~ "Pain in unspecified limb",
+                                                             ICD10 == "M25559" ~ "Pain in unspecified hip",
+                                                             ICD10 == "M25661" ~ "Stiffness of right knee, not elsewhere classified",
+                                                             ICD10 == "M5481" ~ "occipital neuralgia",
+                                                             ICD10 == "M79629" ~ "Pain in unspecified upper arm",
+                                                             ICD10 == "M79671" ~ "pain in the right foot",
+                                                             ICD10 == "M25511" ~ "Pain in Right Shoulder",
+                                                             ICD10 == "M25572" ~ "Pain experienced specifically in the left ankle and the joints of the left foot",
+                                                             ICD10 == "M25639" ~ "Stiffness of unspecified wrist, not elsewhere classified",
+                                                             ICD10 == "M25674" ~ "Stiffness of right foot, not elsewhere classified",
+                                                             ICD10 == "M71439" ~ "Calcium deposit in bursa, unspecified wrist",
+                                                             ICD10 == "M7912" ~ "Myalgia of auxiliary muscles, head and neck",
+                                                             ICD10 == "M7918" ~ "Myalgia, other site",
+                                                             ICD10 == "M79646" ~ "Pain in unspecified finger(s)",
+                                                             ICD10 == "M25519" ~ "pain in unspecified shoulder",
+                                                             ICD10 == "M79622" ~ "Pain in left upper arm",
+                                                             ICD10 == "M79631" ~ "Pain in right forearm",
+                                                             ICD10 == "K4031" ~ "Unilateral inguinal hernia, with obstruction, without gangrene, recurrent",
+                                                             ICD10 == "M25531" ~ "Pain in right wrist"))
+
+### Display the table
+top50 <- top50 %>% select(ICD10, CODE_DESCRIPTION, freq)
+
+DT::datatable(top50)
+```
+
+From looking at the top 50 ICD-10 codes people that had a surgery went through, I believe we are looking at joint procedures for a primary diagnosis involving arthritis. 
